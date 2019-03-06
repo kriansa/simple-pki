@@ -53,3 +53,8 @@ Open the `conf/config.env` file and change everything accordingly.
 
 * [OpenSSL PKI Tutorial](https://pki-tutorial.readthedocs.io/en/latest/index.html)
 * [caman](https://github.com/radiac/caman)
+
+## License
+
+This project is licensed under the BSD 3-Clause License - see the [LICENSE.md](LICENSE.md) file for
+details.
