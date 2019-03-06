@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# shellcheck disable=1091
+#
+# This is a abstraction on top of OpenSSL to help managing a single CA to generate, revoke certs and
+# to sign CRLs.
+#
+# Start by creating a CA using the `bootstrap` subcommand, then use `issue-cert` to create new
+# certificates. Remember to store the CA keys in a secure place, otherwise it can compromise your
+# entire PKI.
+
+function main {
+  # cd to project root path
+  cd "$(dirname "$0")/.." || exit
+
+  load_config
+
+  local command=$1; shift
+  case "$command" in
+    clear) clear_db ;;
+    bootstrap) bootstrap ;;
+    issue-cert) issue_certificate "$1" "$2" ;;
+    revoke-cert) revoke_certificate "$1" ;;
+    make-crl) generate_crl ;;
+    help) help ;;
+    *) help; exit 1 ;;
+  esac
+}
+
+function help {
+  echo "Usage: cert-manager <action> [<args>]"
+  echo ""
+  echo "A simple certificate/CA manager."
+  echo ""
+  echo "Actions:"
+  echo "  clear - Remove the whole DB!"
+  echo "  boostrap - Starts a new CA (and delete the old one, if existent)"
+  echo "  issue-cert <CERT_TYPE> <CN> - Create a new certificate"
+  echo "                                The types can be: vpn or host"
+  echo "  revoke-cert <CN> - Revoke a previously issued certificate"
+  echo "  make-crl - Update the CRL file"
+  echo "  help - Show this dialog"
+}
+
+# Load the config settings from conf/config.env file
+function load_config {
+  set -a
+  source "conf/config.env"
+  set +a
+}
+
+function clear_db {
+  echo "Removing the DB ..."
+  rm -rf "$DB_PATH"
+}
+
+# Remove the old CA (if existent) and then create a new one
+function bootstrap {
+  rm -rf "$CERTS_PATH" "$CA_PATH" "$KEYS_PATH"
+
+  # Initialize the paths and files required for openssl ca
+  mkdir -p "$CERTS_PATH" "$KEYS_PATH" "$CA_PATH"
+  touch "$DB_FILE"
+  echo 1000 > "$CRL_NUMBER_FILE"
+
+  echo "Generating CA key & certificate ..."
+  openssl req -config "conf/openssl/ca-req.conf" \
+    -newkey rsa -nodes -keyout "$CA_KEY" \
+    -new -x509 \
+    -days "$CA_CERT_DAYS" \
+    -out "$CA_CERT"
+}
+
+# Revoke a previously generated certificate
+function revoke_certificate {
+  local cert_name=$1
+
+  local cert_path; cert_path=$(cert_path "$cert_name")
+
+  if ! [ -f "$cert_path" ]; then
+    error "Certificate file not found!"
+    exit 1
+  fi
+
+  echo "Revoking certificate '$cert_name' ..."
+  openssl ca -config "conf/openssl/ca.conf" -revoke "$cert_path"
+}
+
+# Recreates the CRL
+function generate_crl {
+  echo "Creating CRL ..."
+  openssl ca -config "conf/openssl/ca.conf" -gencrl -updatedb -out "$CRL_FILE"
+}
+
+# Do the entire certificate generation process by creating a CSR, a private key and then signing it
+# using the CA.
+function issue_certificate {
+  local cert_type=$1
+  local cert_name=$2
+
+  if [ -z "$cert_type" ]; then
+    echo "Usage: cert-manager issue-cert <CERT_TYPE> <CN>"
+    echo ""
+    echo "The CERT_TYPE can be either 'vpn' or 'host'."
+    echo "The CN is usually the DNS name of the host or the email for a vpn certificate."
+    exit 1
+  fi
+
+  if ! [ -f "conf/openssl/${cert_type}.conf" ]; then
+    error "The certificate type '$cert_type' has no matching configuration on conf/openssl folder."
+    exit 1
+  fi
+
+  generate_csr "$cert_name" || exit 1
+  sign_csr "$cert_type" "$cert_name" || exit 1
+  remove_cert_unused_files "$cert_name"
+}
+
+# When we want to issue a new certificate, first we issue a CSR (Certificate Signing Request) and
+# then we use the CA to sign it and make a new X.509 cert. This process also outputs a certificate
+# name with the serial number of it.
+# This function removes both CSR and the new cert with the serial as a name.
+function remove_cert_unused_files {
+  local cert_name=$1
+
+  rm "$(csr_path "$cert_name")"
+
+  # Remove the file named with a serial number
+  local serial; serial=$(openssl x509 -serial -noout -in "$(cert_path "$cert_name")")
+  rm "$CERTS_PATH/${serial:7:40}.pem"
+}
+
+# Create a CSR (Certificate Signing Request) and a private key
+function generate_csr {
+  local cert_name=$1
+
+  local key_output; key_output=$(key_path "$cert_name")
+  local req_output; req_output=$(csr_path "$cert_name")
+
+  echo "Generating key & CSR..."
+  openssl req -config "conf/openssl/cert-req.conf" \
+    -newkey rsa -nodes -keyout "$key_output" \
+    -new -subj "/CN=$cert_name" \
+    -out "$req_output"
+}
+
+# Use the CA to sign a existing CSR
+function sign_csr {
+  local cert_type=$1
+  local cert_name=$2
+
+  local req_input; req_input=$(csr_path "$cert_name")
+  local cert_output; cert_output=$(cert_path "$cert_name")
+  local conf="conf/openssl/${cert_type}.conf"
+
+  echo "Signing CSR using CA key..."
+  CERT_NAME="$cert_name" openssl ca -config "$conf" \
+    -create_serial -notext -batch \
+    -in "$req_input" -out "$cert_output"
+}
+
+
+# Utility functions
+
+# Get the right path of a certificate, given its CN
+function cert_path { printf "%s/%s-cert.pem\n" "$CERTS_PATH" "$(cn_to_filename "$1")"; }
+function key_path { printf "%s/%s-key.pem\n" "$KEYS_PATH" "$(cn_to_filename "$1")"; }
+function csr_path { printf "%s/%s-csr.pem\n" "$CERTS_PATH" "$(cn_to_filename "$1")"; }
+
+function cn_to_filename {
+  printf "%s" "$1" | sed -e 's/-/ /g' -Ee 's/ +/_/g' | awk '{printf tolower($0)}'
+}
+
+# Displays an error message to stderr
+function error {
+  echo "Error:" "$@" 1>&2
+}
+
+main "$@"

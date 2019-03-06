@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# shellcheck disable=1091
+#
+# This script exists to sync the local DB to a remote persistent space.
+# For the current implementation, we're using AWS S3
+# The buckets & AWS profile should be configured on the file `conf/config.env`
+
+function main {
+  load_config
+
+  local command=$1; shift
+  case "$command" in
+    push) local_to_s3 ;;
+    pull) s3_to_local ;;
+    help) help ;;
+    *) help; exit 1 ;;
+  esac
+}
+
+function help {
+  echo "Usage: cloud-sync <OPERATION>"
+  echo ""
+  echo "Operations:"
+  echo "  push - Push the changed files to the S3 bucket"
+  echo "  pull - Pull the changed files from the S3 bucket"
+}
+
+function local_to_s3 {
+  cd "$DB_PATH" || exit
+  aws s3 sync "$DB_PATH" "s3://${S3_BUCKET}"
+
+  # Also send the updated CRL to the right bucket
+  if [ -f "$CRL_FILE" ]; then
+    aws s3 cp "$CRL_FILE" "s3://${S3_CRL_BUCKET}/root-ca.crl"
+  fi
+}
+
+function s3_to_local {
+  test -d "$CA_PATH" || mkdir -p "$CA_PATH"
+  test -d "$CERTS_PATH" || mkdir -p "$CERTS_PATH"
+
+  cd "$DB_PATH" || exit
+  aws s3 sync "s3://${S3_BUCKET}" "$DB_PATH"
+}
+
+# Load the config settings from conf/config.env file
+function load_config {
+  set -a
+  source "conf/config.env"
+  set +a
+}
+
+main "$@"
