@@ -31,7 +31,7 @@ function local_to_s3 {
 
   # Also send the updated CRL to the right bucket
   if [ -f "$CRL_FILE" ]; then
-    aws s3 cp "$CRL_FILE" "s3://${S3_CRL_BUCKET}/root-ca.crl"
+    aws s3 cp "$CRL_FILE" "s3://${S3_CRL_BUCKET}/root-ca.crl" --acl public-read
   fi
 }
 
